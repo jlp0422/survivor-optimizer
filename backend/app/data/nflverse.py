@@ -1,103 +1,107 @@
 """
-Load data from nflverse-data GitHub releases (parquet files).
-No R required — pure pandas + pyarrow.
+Load data from nflverse via nfl_data_py — the official Python interface.
+Handles URL fetching, caching, and parquet loading automatically.
 """
+from __future__ import annotations
 import logging
-import time
 from pathlib import Path
 from typing import Optional
 import pandas as pd
-import requests
+import nfl_data_py as nfl
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path(__file__).resolve().parents[4] / "data" / "cache"
+CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# nflverse-data GitHub release URL patterns
-NFLVERSE_BASE = "https://github.com/nflverse/nflverse-data/releases/download"
-
-URLS = {
-    "schedules": f"{NFLVERSE_BASE}/schedules/schedules.parquet",
-    "team_stats": f"{NFLVERSE_BASE}/player_stats/player_stats.parquet",
-    "pbp_template": f"{NFLVERSE_BASE}/pbp/play_by_play_{{season}}.parquet",
-}
-
-# Canonical team abbreviation mapping (nflverse → our standard)
+# Canonical team abbreviation normalization
 TEAM_ABBR_MAP = {
-    "ARI": "ARI", "ATL": "ATL", "BAL": "BAL", "BUF": "BUF",
-    "CAR": "CAR", "CHI": "CHI", "CIN": "CIN", "CLE": "CLE",
-    "DAL": "DAL", "DEN": "DEN", "DET": "DET", "GB":  "GB",
-    "HOU": "HOU", "IND": "IND", "JAX": "JAX", "KC":  "KC",
-    "LA":  "LAR", "LAC": "LAC", "LAR": "LAR", "LV":  "LV",
-    "MIA": "MIA", "MIN": "MIN", "NE":  "NE",  "NO":  "NO",
-    "NYG": "NYG", "NYJ": "NYJ", "PHI": "PHI", "PIT": "PIT",
-    "SEA": "SEA", "SF":  "SF",  "TB":  "TB",  "TEN": "TEN",
-    "WAS": "WAS", "JAC": "JAX",
+    "LA":  "LAR", "LAR": "LAR", "SD": "LAC", "OAK": "LV",
+    "STL": "LAR", "JAC": "JAX",
 }
 
 
-def _cached_parquet(url: str, cache_name: str, max_age_hours: int = 24) -> pd.DataFrame:
-    cache_path = CACHE_DIR / f"{cache_name}.parquet"
-    if cache_path.exists():
-        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
-        if age_hours < max_age_hours:
-            logger.debug("Loading %s from cache", cache_name)
-            return pd.read_parquet(cache_path)
+def _normalize_team(abbr: str) -> str:
+    if not isinstance(abbr, str):
+        return abbr
+    return TEAM_ABBR_MAP.get(abbr, abbr)
 
-    logger.info("Downloading %s from %s", cache_name, url)
-    resp = requests.get(url, timeout=120, headers={"User-Agent": "survivor-optimizer/0.1"})
-    resp.raise_for_status()
-    cache_path.write_bytes(resp.content)
-    return pd.read_parquet(cache_path)
+
+ALL_SEASONS = list(range(1999, 2026))
 
 
 def load_schedules(seasons: Optional[list[int]] = None) -> pd.DataFrame:
     """
-    Return schedule DataFrame with columns:
+    Return schedule DataFrame. Columns include:
     season, week, game_type, gameday, home_team, away_team,
-    home_score, away_score, result (positive=home win margin)
+    home_score, away_score, result, neutral_site
+
+    Always fetches the full range and caches it so per-season calls hit the cache.
     """
-    df = _cached_parquet(URLS["schedules"], "schedules", max_age_hours=6)
-    df["home_team"] = df["home_team"].map(lambda x: TEAM_ABBR_MAP.get(x, x))
-    df["away_team"] = df["away_team"].map(lambda x: TEAM_ABBR_MAP.get(x, x))
+    cache_path = CACHE_DIR / "schedules.parquet"
 
-    # Filter to regular season + playoffs, remove preseason
-    df = df[df["game_type"].isin(["REG", "WC", "DIV", "CON", "SB"])].copy()
+    # Check cache (refresh if > 6 hours old)
+    import time
+    if cache_path.exists():
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
+        if age_hours < 6:
+            logger.debug("Loading schedules from cache")
+            df = pd.read_parquet(cache_path)
+            if seasons:
+                df = df[df["season"].isin(seasons)]
+            return df.reset_index(drop=True)
 
-    if seasons:
-        df = df[df["season"].isin(seasons)]
+    # Always fetch the full history so subsequent per-season calls hit cache
+    fetch_seasons = ALL_SEASONS
+    logger.info("Fetching full schedule history via nfl_data_py (%d seasons)", len(fetch_seasons))
+    df = nfl.import_schedules(fetch_seasons)
 
+    df["home_team"] = df["home_team"].map(_normalize_team)
+    df["away_team"] = df["away_team"].map(_normalize_team)
+
+    # Filter to regular season + playoffs
+    if "game_type" in df.columns:
+        df = df[df["game_type"].isin(["REG", "WC", "DIV", "CON", "SB"])].copy()
+
+    df.to_parquet(cache_path, index=False)
     return df.reset_index(drop=True)
 
 
 def load_pbp_epa(season: int) -> pd.DataFrame:
     """
-    Load play-by-play for a season, aggregate to team-week EPA per play.
-    Returns DataFrame with: season, week, team, off_epa_per_play, def_epa_per_play
+    Load play-by-play for a season and aggregate to team-week EPA per play.
+    Returns DataFrame: season, week, team, off_epa_per_play, def_epa_per_play
     """
-    url = URLS["pbp_template"].format(season=season)
-    cache_name = f"pbp_{season}"
-    # PBP files are large and rarely updated mid-season
-    max_age = 168 if season < 2024 else 12  # 1 week for historical, 12h for current
+    cache_path = CACHE_DIR / f"epa_{season}.parquet"
 
+    import time
+    if cache_path.exists():
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
+        max_age = 168 if season < 2024 else 12
+        if age_hours < max_age:
+            logger.debug("Loading EPA %d from cache", season)
+            return pd.read_parquet(cache_path)
+
+    logger.info("Fetching EPA data for season %d via nfl_data_py", season)
     try:
-        pbp = _cached_parquet(url, cache_name, max_age_hours=max_age)
+        pbp = nfl.import_pbp_data(
+            [season],
+            columns=["season", "week", "season_type", "posteam", "defteam", "epa"],
+            downcast=True,
+        )
     except Exception as e:
         logger.warning("Could not load PBP for %d: %s", season, e)
         return pd.DataFrame()
 
-    # Filter to regular season plays with valid EPA
     pbp = pbp[
         (pbp["season_type"] == "REG") &
-        (pbp["epa"].notna()) &
-        (pbp["posteam"].notna())
+        pbp["epa"].notna() &
+        pbp["posteam"].notna()
     ].copy()
 
-    pbp["posteam"] = pbp["posteam"].map(lambda x: TEAM_ABBR_MAP.get(x, x))
-    pbp["defteam"] = pbp["defteam"].map(lambda x: TEAM_ABBR_MAP.get(x, x))
+    pbp["posteam"] = pbp["posteam"].map(_normalize_team)
+    pbp["defteam"] = pbp["defteam"].map(_normalize_team)
 
-    # Offensive EPA: plays where team has possession
     off_epa = (
         pbp.groupby(["season", "week", "posteam"])["epa"]
         .mean()
@@ -105,7 +109,6 @@ def load_pbp_epa(season: int) -> pd.DataFrame:
         .rename(columns={"posteam": "team", "epa": "off_epa_per_play"})
     )
 
-    # Defensive EPA: plays where team is defending
     def_epa = (
         pbp.groupby(["season", "week", "defteam"])["epa"]
         .mean()
@@ -114,6 +117,7 @@ def load_pbp_epa(season: int) -> pd.DataFrame:
     )
 
     merged = off_epa.merge(def_epa, on=["season", "week", "team"], how="outer")
+    merged.to_parquet(cache_path, index=False)
     return merged
 
 

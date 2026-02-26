@@ -25,8 +25,8 @@ from app.db.models import Game, TeamWeekStats
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = Path(__file__).resolve().parents[4] / "data" / "win_prob_model.pkl"
-METRICS_PATH = Path(__file__).resolve().parents[4] / "data" / "model_metrics.json"
+MODEL_PATH = Path(__file__).resolve().parents[3] / "data" / "win_prob_model.pkl"
+METRICS_PATH = Path(__file__).resolve().parents[3] / "data" / "model_metrics.json"
 
 HOME_FIELD_PTS = 3.0   # points worth of home field advantage
 

@@ -40,6 +40,10 @@ def main():
         help="Skip data backfill (use if already done)"
     )
     parser.add_argument(
+        "--with-dvoa", action="store_true",
+        help="Attempt to scrape Football Outsiders DVOA (off by default — often blocked)"
+    )
+    parser.add_argument(
         "--skip-training", action="store_true",
         help="Skip model training"
     )
@@ -56,7 +60,7 @@ def main():
         # 2. Backfill historical data
         if not args.skip_backfill:
             logger.info("Step 2: Backfilling historical data for seasons %s", args.seasons)
-            backfill_historical(db, seasons=args.seasons)
+            backfill_historical(db, seasons=args.seasons, include_dvoa=args.with_dvoa)
         else:
             logger.info("Step 2: Skipping backfill")
             seed_teams(db)

@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path(__file__).resolve().parents[4] / "data" / "cache"
+CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 FO_BASE = "https://www.footballoutsiders.com"
@@ -70,7 +70,7 @@ def scrape_dvoa_week(season: int, week: int) -> pd.DataFrame:
 
     try:
         resp = _rate_limited_get(url)
-    except requests.HTTPError as e:
+    except (requests.HTTPError, requests.ConnectionError, requests.Timeout, OSError) as e:
         logger.warning("FO DVOA %d w%d not available: %s", season, week, e)
         return pd.DataFrame()
 

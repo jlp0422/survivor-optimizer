@@ -4,11 +4,11 @@ into the database. Run this to backfill historical data or refresh current seaso
 """
 from __future__ import annotations
 import logging
+import pandas as pd
 from sqlalchemy.orm import Session
 from app.db.models import Team, Game, TeamWeekStats
 from app.data.nflverse import load_schedules, load_pbp_epa
 from app.data.football_outsiders import scrape_dvoa_season, get_latest_dvoa
-from app.data.pro_football_reference import scrape_srs_season, compute_point_differentials
 
 logger = logging.getLogger(__name__)
 
@@ -123,56 +123,112 @@ def load_season_schedule(db: Session, season: int, team_map: dict[str, int]) -> 
     logger.info("Loaded %d new games for season %d", count, season)
 
 
-def load_team_stats(db: Session, season: int, team_map: dict[str, int]) -> None:
+def _compute_stats_from_schedules(schedules: pd.DataFrame) -> pd.DataFrame:
     """
-    Combine DVOA, EPA, SRS, and point differential data into TeamWeekStats.
+    Derive per-team per-week stats entirely from nflverse schedule data.
+    Returns DataFrame: team, season, week, point_diff, recent_form, rest_days, srs
     """
-    # Load all data sources
-    epa_df = load_pbp_epa(season)
-    dvoa_df = scrape_dvoa_season(season)
-    srs_df = scrape_srs_season(season)
-    pdiff_df = compute_point_differentials(season)
+    if schedules.empty:
+        return pd.DataFrame()
 
-    # Get schedule for rest days computation
+    sched = schedules.copy()
+    # Only completed games
+    completed = sched[sched["home_score"].notna() & sched["away_score"].notna()].copy()
+    completed["home_score"] = completed["home_score"].astype(float)
+    completed["away_score"] = completed["away_score"].astype(float)
+
+    # Build one row per team per game
+    home_rows = completed[["season", "week", "home_team", "away_team", "home_score", "away_score"]].copy()
+    home_rows.rename(columns={"home_team": "team", "away_team": "opponent"}, inplace=True)
+    home_rows["point_diff"] = home_rows["home_score"] - home_rows["away_score"]
+    home_rows["is_home"] = True
+
+    away_rows = completed[["season", "week", "away_team", "home_team", "away_score", "home_score"]].copy()
+    away_rows.rename(columns={"away_team": "team", "home_team": "opponent"}, inplace=True)
+    away_rows["point_diff"] = away_rows["away_score"] - away_rows["home_score"]
+    away_rows["is_home"] = False
+
+    games = pd.concat([home_rows, away_rows], ignore_index=True)
+    games = games.sort_values(["team", "season", "week"])
+
+    # Rolling 4-game recent form (uses prior games, not current)
+    games["recent_form"] = (
+        games.groupby(["team", "season"])["point_diff"]
+        .transform(lambda x: x.shift(1).rolling(4, min_periods=1).mean())
+    )
+
+    # Rest days: weeks between games * 7 (first game = 10 days)
+    games["prev_week"] = games.groupby(["team", "season"])["week"].shift(1)
+    games["rest_days"] = ((games["week"] - games["prev_week"]) * 7).fillna(10).astype(int)
+
+    # Compute SRS per team per season: iterative MOV + SOS adjustment (3 iterations)
+    srs_map: dict[tuple, float] = {}
+    for (season_val,), grp in games.groupby(["season"]):
+        team_mov = grp.groupby("team")["point_diff"].mean().to_dict()
+        srs = {t: v for t, v in team_mov.items()}
+        for _ in range(3):
+            new_srs: dict[str, float] = {}
+            for team, tg in grp.groupby("team"):
+                sos = tg["opponent"].map(lambda o: srs.get(o, 0.0)).mean()
+                new_srs[team] = team_mov.get(team, 0.0) + sos * 0.5
+            srs = new_srs
+        for team, val in srs.items():
+            srs_map[(team, int(season_val))] = val
+
+    games["srs"] = games.apply(
+        lambda r: srs_map.get((r["team"], int(r["season"])), 0.0), axis=1
+    )
+
+    return games[["team", "season", "week", "point_diff", "recent_form", "rest_days", "srs"]]
+
+
+def load_team_stats(db: Session, season: int, team_map: dict[str, int], include_dvoa: bool = False) -> None:
+    """
+    Build TeamWeekStats from nflverse EPA + schedule-derived stats.
+    DVOA is optional (off by default — FO blocks scrapers).
+    PFR is no longer used; point diff, SRS, and rest are computed from nflverse schedules.
+    """
     schedules = load_schedules(seasons=[season])
+    epa_df = load_pbp_epa(season)
+    dvoa_df = scrape_dvoa_season(season) if include_dvoa else pd.DataFrame()
+    sched_stats = _compute_stats_from_schedules(schedules)
 
-    # Build rest days lookup
+    # Build rest days for all team-weeks (including unplayed/future games)
     rest_days_map: dict[tuple, int] = {}
     if not schedules.empty:
-        schedules_sorted = schedules.sort_values(["season", "week"])
-        for team in schedules_sorted["home_team"].unique():
-            team_games = schedules_sorted[
-                (schedules_sorted["home_team"] == team) |
-                (schedules_sorted["away_team"] == team)
-            ].copy()
-            team_games = team_games.sort_values("week")
-            for i, row in enumerate(team_games.itertuples()):
-                if i == 0:
-                    rest_days_map[(team, season, row.week)] = 10  # assume full rest first week
-                else:
-                    prev_week = team_games.iloc[i - 1]["week"]
-                    week_diff = row.week - prev_week
-                    rest_days_map[(team, season, row.week)] = week_diff * 7
+        all_sched = schedules.sort_values(["season", "week"])
+        all_teams = set(all_sched["home_team"].tolist()) | set(all_sched["away_team"].tolist())
+        for team in all_teams:
+            team_games = all_sched[
+                (all_sched["home_team"] == team) | (all_sched["away_team"] == team)
+            ].sort_values("week")
+            prev_week = None
+            for _, row in team_games.iterrows():
+                w = int(row["week"])
+                rest_days_map[(team, season, w)] = (
+                    10 if prev_week is None else int((w - prev_week) * 7)
+                )
+                prev_week = w
 
-    # Get all weeks from any source
+    # Collect all team-weeks that appear in EPA data or schedule
     all_team_weeks: set[tuple] = set()
-    for df, team_col, week_col in [
-        (epa_df, "team", "week"),
-        (dvoa_df, "team", "week"),
-        (pdiff_df, "team", "week"),
-    ]:
-        if not df.empty and week_col in df.columns:
-            for _, row in df.iterrows():
-                all_team_weeks.add((str(row[team_col]), int(row[week_col])))
+    if not epa_df.empty:
+        for _, row in epa_df.iterrows():
+            all_team_weeks.add((str(row["team"]), int(row["week"])))
+    if not sched_stats.empty:
+        for _, row in sched_stats.iterrows():
+            all_team_weeks.add((str(row["team"]), int(row["week"])))
 
-    # SRS is season-level, not week-level
-    srs_lookup = {}
-    if not srs_df.empty:
-        for _, row in srs_df.iterrows():
-            srs_lookup[str(row["team"])] = {
-                "srs": row.get("srs"),
-                "mov": row.get("mov"),
-            }
+    # Index lookup DataFrames for fast access
+    epa_idx = (
+        epa_df.set_index(["team", "week"]) if not epa_df.empty else pd.DataFrame()
+    )
+    sched_idx = (
+        sched_stats.set_index(["team", "week"]) if not sched_stats.empty else pd.DataFrame()
+    )
+    dvoa_idx = (
+        dvoa_df.set_index(["team", "week"]) if not dvoa_df.empty else pd.DataFrame()
+    )
 
     upserted = 0
     for (team_abbr, week) in sorted(all_team_weeks):
@@ -183,45 +239,33 @@ def load_team_stats(db: Session, season: int, team_map: dict[str, int]) -> None:
         stats = db.query(TeamWeekStats).filter_by(
             team_id=team_id, season=season, week=week
         ).first()
-
         if not stats:
             stats = TeamWeekStats(team_id=team_id, season=season, week=week)
             db.add(stats)
 
+        key = (team_abbr, week)
+
         # EPA
-        if not epa_df.empty:
-            epa_row = epa_df[
-                (epa_df["team"] == team_abbr) & (epa_df["week"] == week)
-            ]
-            if not epa_row.empty:
-                stats.off_epa_per_play = float(epa_row.iloc[0].get("off_epa_per_play", 0) or 0)
-                stats.def_epa_per_play = float(epa_row.iloc[0].get("def_epa_per_play", 0) or 0)
+        if not epa_idx.empty and key in epa_idx.index:
+            row = epa_idx.loc[key]
+            stats.off_epa_per_play = float(row.get("off_epa_per_play") or 0)
+            stats.def_epa_per_play = float(row.get("def_epa_per_play") or 0)
 
-        # DVOA
-        if not dvoa_df.empty:
-            dvoa_row = dvoa_df[
-                (dvoa_df["team"] == team_abbr) & (dvoa_df["week"] == week)
-            ]
-            if not dvoa_row.empty:
-                stats.total_dvoa = dvoa_row.iloc[0].get("total_dvoa")
-                stats.offense_dvoa = dvoa_row.iloc[0].get("offense_dvoa")
-                stats.defense_dvoa = dvoa_row.iloc[0].get("defense_dvoa")
-                stats.st_dvoa = dvoa_row.iloc[0].get("st_dvoa")
+        # Schedule-derived stats
+        if not sched_idx.empty and key in sched_idx.index:
+            row = sched_idx.loc[key]
+            stats.point_differential = float(row.get("point_diff") or 0)
+            stats.recent_form = float(row.get("recent_form") or 0)
+            stats.srs = float(row.get("srs") or 0)
 
-        # Point diff + recent form
-        if not pdiff_df.empty:
-            pdiff_row = pdiff_df[
-                (pdiff_df["team"] == team_abbr) & (pdiff_df["week"] == week)
-            ]
-            if not pdiff_row.empty:
-                stats.point_differential = pdiff_row.iloc[0].get("point_diff")
-                stats.recent_form = pdiff_row.iloc[0].get("recent_form")
+        # DVOA (optional)
+        if not dvoa_idx.empty and key in dvoa_idx.index:
+            row = dvoa_idx.loc[key]
+            stats.total_dvoa = row.get("total_dvoa")
+            stats.offense_dvoa = row.get("offense_dvoa")
+            stats.defense_dvoa = row.get("defense_dvoa")
+            stats.st_dvoa = row.get("st_dvoa")
 
-        # SRS (season-level)
-        if team_abbr in srs_lookup:
-            stats.srs = srs_lookup[team_abbr].get("srs")
-
-        # Rest days
         stats.rest_days = rest_days_map.get((team_abbr, season, week), 7)
         upserted += 1
 
@@ -229,7 +273,7 @@ def load_team_stats(db: Session, season: int, team_map: dict[str, int]) -> None:
     logger.info("Upserted %d team-week stats records for season %d", upserted, season)
 
 
-def backfill_historical(db: Session, seasons: list[int] | None = None) -> None:
+def backfill_historical(db: Session, seasons: list[int] | None = None, include_dvoa: bool = False) -> None:
     """Backfill all data for historical seasons (2015–2024)."""
     if seasons is None:
         seasons = list(range(2015, 2025))
@@ -239,14 +283,14 @@ def backfill_historical(db: Session, seasons: list[int] | None = None) -> None:
     for season in seasons:
         logger.info("=== Backfilling season %d ===", season)
         load_season_schedule(db, season, team_map)
-        load_team_stats(db, season, team_map)
+        load_team_stats(db, season, team_map, include_dvoa=include_dvoa)
 
     logger.info("Backfill complete for seasons %s", seasons)
 
 
-def refresh_current_season(db: Session, season: int, current_week: int) -> None:
+def refresh_current_season(db: Session, season: int, current_week: int, include_dvoa: bool = False) -> None:
     """Refresh data for the current season up to the given week."""
     team_map = seed_teams(db)
     load_season_schedule(db, season, team_map)
-    load_team_stats(db, season, team_map)
+    load_team_stats(db, season, team_map, include_dvoa=include_dvoa)
     logger.info("Refreshed season %d through week %d", season, current_week)

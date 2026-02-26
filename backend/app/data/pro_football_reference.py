@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup, Comment
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path(__file__).resolve().parents[4] / "data" / "cache"
+CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 PFR_BASE = "https://www.pro-football-reference.com"

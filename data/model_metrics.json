@@ -1,0 +1,22 @@
+{
+  "train_seasons": [
+    2015,
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2024
+  ],
+  "n_train_samples": 2458,
+  "train_brier_score": 0.0371,
+  "train_log_loss": 0.1257,
+  "home_win_rate": 0.5476,
+  "val_season": 2023,
+  "n_val_samples": 285,
+  "val_brier_score": 0.0376,
+  "val_log_loss": 0.1251,
+  "val_accuracy": 0.9509
+}
