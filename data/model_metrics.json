@@ -8,15 +8,16 @@
     2020,
     2021,
     2022,
-    2024
+    2023,
+    2025
   ],
-  "n_train_samples": 2458,
-  "train_brier_score": 0.0371,
-  "train_log_loss": 0.1257,
-  "home_win_rate": 0.5476,
-  "val_season": 2023,
+  "n_train_samples": 2743,
+  "train_brier_score": 0.0386,
+  "train_log_loss": 0.1298,
+  "home_win_rate": 0.5479,
+  "val_season": 2024,
   "n_val_samples": 285,
-  "val_brier_score": 0.0376,
-  "val_log_loss": 0.1251,
-  "val_accuracy": 0.9509
+  "val_brier_score": 0.0364,
+  "val_log_loss": 0.1238,
+  "val_accuracy": 0.9614
 }

@@ -27,7 +27,7 @@ def _normalize_team(abbr: str) -> str:
     return TEAM_ABBR_MAP.get(abbr, abbr)
 
 
-ALL_SEASONS = list(range(1999, 2026))
+ALL_SEASONS = list(range(1999, 2027))
 
 
 def load_schedules(seasons: Optional[list[int]] = None) -> pd.DataFrame:

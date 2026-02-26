@@ -4,8 +4,8 @@ import { clsx } from 'clsx'
 import { api } from '../lib/api'
 import PickCard from '../components/PickCard'
 
-const CURRENT_SEASON = 2024
-const CURRENT_WEEK = 1   // TODO: derive from schedule
+const CURRENT_SEASON = 2025
+const CURRENT_WEEK = 1
 
 export default function Dashboard() {
   const qc = useQueryClient()

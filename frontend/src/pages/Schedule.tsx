@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import TeamCalendar from '../components/TeamCalendar'
 
-const CURRENT_SEASON = 2024
+const CURRENT_SEASON = 2025
 const CURRENT_WEEK = 1
 
 export default function Schedule() {

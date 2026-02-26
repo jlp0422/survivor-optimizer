@@ -7,7 +7,7 @@ import {
 import { api, SimulationResponse } from '../lib/api'
 import SurvivalCurve from '../components/SurvivalCurve'
 
-const CURRENT_SEASON = 2024
+const CURRENT_SEASON = 2025
 const CURRENT_WEEK = 1
 
 export default function Simulation() {

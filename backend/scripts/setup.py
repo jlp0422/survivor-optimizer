@@ -28,8 +28,8 @@ def main():
     parser = argparse.ArgumentParser(description="NFL Survivor Optimizer setup")
     parser.add_argument(
         "--seasons", nargs="+", type=int,
-        default=list(range(2015, 2025)),
-        help="Seasons to backfill (default: 2015-2024)"
+        default=list(range(2015, 2026)),
+        help="Seasons to backfill (default: 2015-2025)"
     )
     parser.add_argument(
         "--val-season", type=int, default=2023,
@@ -80,11 +80,12 @@ def main():
         else:
             logger.info("Step 3: Skipping model training")
 
-        # 4. Update win probs for current season (2024/2025)
-        logger.info("Step 4: Updating win probabilities for current season")
+        # 4. Update win probs for current season
+        current_season = max(args.seasons) if not args.skip_backfill else 2025
+        logger.info("Step 4: Updating win probabilities for season %d", current_season)
         model = WinProbabilityModel()
         if model.load():
-            updated = update_game_win_probs(db, model, season=2024)
+            updated = update_game_win_probs(db, model, season=current_season)
             logger.info("Updated win probs for %d games", updated)
         else:
             logger.warning("No model available — skipping win prob update")
